@@ -262,6 +262,9 @@ class EventsApiIT {
         assertThat(operation.path("responses").has("201")).isTrue();
         assertThat(operation.path("responses").has("400")).isTrue();
         assertThat(operation.path("responses").has("409")).isTrue();
+        assertThat(operation.path("responses").has("503")).isTrue();
+        assertThat(operation.path("responses").path("201").toString()).contains("IngestionResponse");
+        assertThat(operation.path("responses").path("400").toString()).contains("ProblemDetail");
         JsonNode single = body.path("examples").path("Single event").path("value");
         JsonNode batch = body.path("examples").path("Batch of events").path("value");
         assertThat(ingest(single).getStatusCode()).isEqualTo(HttpStatus.CREATED);

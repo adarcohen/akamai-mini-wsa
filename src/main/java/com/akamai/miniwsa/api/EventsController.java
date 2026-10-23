@@ -6,9 +6,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
-import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.springframework.http.ProblemDetail;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,21 +39,7 @@ public class EventsController {
                             examples = {
                                     @ExampleObject(name = "Single event", value = IngestionExamples.SINGLE_EVENT),
                                     @ExampleObject(name = "Batch of events", value = IngestionExamples.BATCH)
-                            })),
-            responses = {
-                    @ApiResponse(responseCode = "201", description = "All events stored successfully",
-                            content = @Content(mediaType = "application/json",
-                                    schema = @Schema(implementation = IngestionResponse.class))),
-                    @ApiResponse(responseCode = "400", description = "Invalid request or event fields",
-                            content = @Content(mediaType = "application/problem+json",
-                                    schema = @Schema(implementation = ProblemDetail.class))),
-                    @ApiResponse(responseCode = "409", description = "An eventId already exists; entire request rolled back",
-                            content = @Content(mediaType = "application/problem+json",
-                                    schema = @Schema(implementation = ProblemDetail.class))),
-                    @ApiResponse(responseCode = "503", description = "Storage temporarily unavailable",
-                            content = @Content(mediaType = "application/problem+json",
-                                    schema = @Schema(implementation = ProblemDetail.class)))
-            })
+                            })))
     @PostMapping("/ingest")
     @ResponseStatus(HttpStatus.CREATED)
     public IngestionResponse ingest(@RequestBody JsonNode body) {
