@@ -1,0 +1,19 @@
+{
+  "batchSize": 1000,
+  "distinctIpsPerBatch": 1000,
+  "requests": 5,
+  "batchLatenciesMs": [
+    423.4022080199793,
+    241.77674995735288,
+    167.12858295068145,
+    225.76529206708074,
+    185.80437498167157
+  ],
+  "p50Ms": 225.76529206708074,
+  "p95Ms": 423.4022080199793,
+  "notes": "Local Compose, sequential requests, same IP set reused, timings include JSON serialization/network/response parsing; JVM/cache warm-up included. Recorded during final clean verification with other test containers sharing local Docker resources; not a controlled capacity benchmark.",
+  "initialRows": 1,
+  "finalRows": 5001,
+  "concurrentWriters": 1,
+  "measuredAtUtc": "2026-10-23T13:49:48.280781+00:00"
+}

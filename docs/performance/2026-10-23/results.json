@@ -1,0 +1,56 @@
+{
+  "measuredAtUtc": "2026-10-23T13:46:43.021895+00:00",
+  "architecture": "arm64",
+  "batchSize": 500,
+  "concurrentWriters": 1,
+  "scenarios": [
+    {
+      "events": 10000,
+      "batches": 20,
+      "ingestionSeconds": 0.963,
+      "eventsPerSecond": 10383.5,
+      "batchP50Ms": 44.45,
+      "batchP95Ms": 58.8,
+      "meanUniqueIpsPerBatch": 196.8,
+      "summaryP50Ms": 11.17,
+      "summaryMeasuredRequests": 5,
+      "plans": {
+        "aggregation": {
+          "planningMs": 0.442,
+          "executionMs": 2.979
+        },
+        "repeat-offender": {
+          "planningMs": 0.44,
+          "executionMs": 1.19
+        }
+      }
+    },
+    {
+      "events": 100000,
+      "batches": 200,
+      "ingestionSeconds": 7.554,
+      "eventsPerSecond": 13237.4,
+      "batchP50Ms": 35.85,
+      "batchP95Ms": 50.88,
+      "meanUniqueIpsPerBatch": 198.4,
+      "summaryP50Ms": 70.86,
+      "summaryMeasuredRequests": 5,
+      "plans": {
+        "aggregation": {
+          "planningMs": 0.506,
+          "executionMs": 13.397
+        },
+        "repeat-offender": {
+          "planningMs": 0.412,
+          "executionMs": 1.827
+        }
+      }
+    }
+  ],
+  "repositoryCodeSha256": "582c9a7af0160495e6bf37c06ffab515b0c557a19ae0173279ba13d997d92d16",
+  "docker": {
+    "cpus": 8,
+    "memoryBytes": 8321798144,
+    "version": "29.6.1"
+  }
+}
