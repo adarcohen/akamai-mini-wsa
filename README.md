@@ -2,13 +2,13 @@
 
 A Java/Spring Boot security analytics backend, built incrementally for the Akamai assignment.
 
-## Current milestone: durable ingestion
+## Current milestone: classification and enrichment
 
 Implemented: event model, single/batch ingestion, schema validation, server-assigned
-`receivedAt`, PostgreSQL persistence and atomic duplicate handling.
+`receivedAt`, PostgreSQL persistence, atomic duplicate handling, attack classification
+and threat scoring, including concurrent repeat-offender detection.
 
-Classification, threat scoring, summary/samples APIs and data generation are subsequent
-milestones. The optional full-stack Docker setup will follow; Compose currently runs
+Summary/samples APIs and data generation are subsequent milestones. The optional full-stack Docker setup will follow; Compose currently runs
 PostgreSQL while the application runs locally.
 
 ## Requirements
@@ -93,7 +93,7 @@ required event fields, enum values, success responses and HTTP 400/409/503 error
 `examples/event.json` contains every required field.
 
 Success returns HTTP 201 with `accepted` and an `events` array. Each response event
-contains the original validated fields plus `receivedAt`. The success response is
+contains the original validated fields plus `receivedAt`, `attackType` and `threatScore`. The success response is
 sent only after the database transaction commits. Events in one request share an
 arrival timestamp, truncated to PostgreSQL's microsecond precision.
 
@@ -128,7 +128,8 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `domain/SecurityEvent.java`: immutable event, with nested `Rule`/`GeoLocation` records and validation annotations.
 - `domain/Action.java`, `Category.java`, `Severity.java`: allowed enum values.
 - `domain/ClientIp.java`: IP literal validation and canonicalization.
-- `domain/ReceivedEvent.java`: original event plus arrival time, shared by persistence and API layers.
+- `domain/EnrichedEvent.java`: original event plus classification, score and arrival time.
+- `domain/EnrichmentPolicy.java`: pure scoring calculation from event, prior count and arrival time.
 - `api/EventsController.java`: HTTP endpoint; delegates validation and persistence.
 - `api/IngestionRequestParser.java`: normalizes object/array input, parses and validates every event.
 - `api/IngestionResponse.java`: the HTTP success envelope.
@@ -136,10 +137,11 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `api/ApiExceptionHandler.java`: maps validation, conflicts and temporary storage failures to HTTP errors.
 - `api/IsoInstantDeserializer.java`: requires ISO-8601 timestamp strings.
 - `api/IngestionExamples.java`: single and batch request examples for Swagger UI.
-- `service/IngestionService.java`: assigns arrival times and owns the all-or-nothing transaction.
+- `service/IngestionService.java`: coordinates IP activity, enrichment and the all-or-nothing transaction.
 - `repository/EventRepository.java`: parameterized, batched JDBC inserts; contains no HTTP logic.
 - `resources/application.yml`: database connection and strict JSON settings.
-- `resources/db/migration/V1__create_security_events.sql`: Flyway's versioned table definition.
+- `resources/db/migration/V1__create_security_events.sql`: Flyway's original table definition.
+- `resources/db/migration/V2__enrich_security_events.sql`: adds enrichment columns, an IP/time index and backfills existing data.
 - `MiniWsaApplication.java`: app entry point and injectable UTC clock.
 - `compose.yaml`: development PostgreSQL service, health check and persistent volume.
 - `.env.example`: example local configuration; `.env` itself is excluded from Git.
@@ -153,8 +155,8 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 PostgreSQL provides durable storage, transactions, a uniqueness constraint and SQL
 aggregations in one dependency. Query dimensions are typed columns; the complete
 original event is JSONB. This supports future statistics without dropping original fields.
-The primary key supplies the uniqueness index. Additional query indexes will be added
-with the enrichment/analytics queries they support rather than indexing every field now.
+The primary key supplies the uniqueness index. An additional `(client_ip, received_at, event_id)`
+index supports bounded repeat-offender lookups. Analytics indexes will be added with their queries.
 
 JDBC keeps the insert and future grouping queries explicit. There are no entity
 relationships or lazy-loading requirements here, so JPA/Hibernate would add machinery
@@ -171,6 +173,55 @@ scale improvements should follow measurements: bounded retention/time partitioni
 query indexes, aggregation rollups and queue-based buffering if bursts require it.
 Global event-ID uniqueness must be reconsidered explicitly before time partitioning.
 
+## Classification and threat scoring
+
+Category mappings are exactly those in the assignment: injection to SQL/Command Injection,
+XSS to Cross-Site Scripting, protocol violation to Protocol Anomaly, data leakage to Data
+Exfiltration, BOT to Bot Activity, DOS to Denial of Service and RATE_LIMIT to Rate Limiting.
+
+Scores add:
+
+- Severity: CRITICAL 40, HIGH 30, MEDIUM 20, LOW 10.
+- Action: DENY +20, ALERT +10, MONITOR +0.
+- Sensitive path: +15 once if the case-sensitive path contains `/admin` or `/login`.
+- Repeat offender: +15 on the sixth and later recent arrivals from the same canonical IP.
+
+The result is capped at 100; the maximum reachable under the current weights is 90.
+`EnrichmentPolicy` implements this calculation without database access or a clock dependency.
+
+### Time-window decisions
+
+The assignment leaves some counting details implicit. This implementation uses these explicit rules:
+
+- The repeat window uses server arrival time (`receivedAt`), independently of the client's event timestamp.
+  Historical logs can therefore still form a current arrival burst. Future analytics will use event time.
+- The current event is included in the threshold, so five prior arrivals qualify it for the bonus.
+- The interval is inclusive: `[receivedAt - 10 minutes, receivedAt]`.
+- Counts are global across configurations, keyed by canonical IP. Equivalent IPv6 spellings share counts.
+- A batch has one arrival time and is scored in input-array order. Earlier events in that same batch count.
+- Scores are assigned once and are not retroactively modified as events expire from the window.
+
+The service locks all involved IPs before reading the clock or activity. PostgreSQL transaction-scoped
+advisory locks coordinate multiple app instances, and sorted numeric lock keys avoid inverted lock order
+for overlapping batches. A hash collision only serializes unrelated clients; counting still filters full IPs.
+Explicit read-committed isolation gives the count query a fresh snapshot after a preceding writer commits.
+
+A single query acquires all locks and another query fetches all prior counts. Each IP lookup stops after
+five records, because higher counts cannot change the bonus. Earlier events in the current batch are
+counted in a request-local map, then enriched records are inserted using the existing JDBC batch.
+A rollback discards both the writes and those temporary counts. Locks release on commit or rollback.
+
+This favors correctness for a hot IP over parallel writes for that same IP. It assumes reasonably
+synchronized application clocks; clock-skew policy and throughput measurements remain future work.
+Statement/lock timeouts bound database waits.
+
+### Existing v0.1 data
+
+Flyway applies V2 without dropping the V1 table or modifying its original migration. Existing records
+receive classification and scores; original payloads and arrival times stay intact. The V1 schema did
+not preserve array order for equal arrival timestamps, so the one-time legacy backfill breaks those ties
+by `eventId`. New requests always use input-array order. The upgrade is verified against a seeded V1 database.
+
 ## Tests
 
 ```bash
@@ -179,10 +230,15 @@ Global event-ID uniqueness must be reconsidered explicitly before time partition
 ```
 
 `SecurityEventValidationTest` checks required fields, boundaries and nested validation.
+`EnrichmentPolicyTest` covers all category mappings and the severity/action/path/repeat-threshold matrix.
+`EnrichmentMigrationIT` upgrades a seeded V1 database and verifies data preservation and backfilled scores.
 `EventsApiIT` sends real HTTP requests to the app on a random port, backed by an isolated
 PostgreSQL 17 Testcontainer. It checks persisted payloads/timestamps, batch writes,
 validation without writes, duplicate conflicts, rollback, concurrent duplicates,
-IP literals and parameterized SQL handling.
+IP literals and parameterized SQL handling. It also checks the sixth event in a batch, exact
+window boundaries, expiry, cross-configuration counts, equivalent IPv6 addresses, failed-batch
+count rollback, parallel scoring and overlapping multi-IP batches. Swagger schemas and examples
+remain covered by HTTP tests.
 
 The `IT` filename suffix makes Maven Failsafe run these tests during `verify`, while
 Surefire runs unit tests during `test`. No integration tests are silently skipped when
@@ -198,12 +254,12 @@ export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
 
 ## Milestones and next steps
 
-The durable ingestion stage is ready for review before tagging `v0.1-ingestion`.
-Next: classification and threat scoring, including an explicit ten-minute repeat-offender
-policy and tests, then the statistics/samples APIs and a realistic data generator.
+`v0.1-ingestion` marks durable ingestion. Classification and enrichment are ready for review
+before tagging `v0.2-enrichment`. Next are the statistics/samples APIs and a realistic data generator.
 
-Current engineering challenges are atomic batches and concurrent duplicate requests.
-They are handled by a transaction plus database uniqueness, verified against real PostgreSQL.
+Current engineering challenges include atomic batches, duplicate requests and stable repeat-offender
+scores under concurrent ingestion. Transactions, database uniqueness and ordered IP locks address
+these concerns, verified against real PostgreSQL.
 The injected clock makes arrival-time tests deterministic without sleeps.
 
 Additional production concerns include tenant authorization, authentication, external

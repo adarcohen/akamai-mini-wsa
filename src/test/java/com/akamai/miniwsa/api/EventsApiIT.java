@@ -6,6 +6,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.OffsetDateTime;
@@ -44,6 +51,7 @@ class EventsApiIT {
     @Autowired private TestRestTemplate http;
     @Autowired private ObjectMapper mapper;
     @Autowired private JdbcTemplate jdbc;
+    @Autowired private MutableClock clock;
 
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -58,6 +66,7 @@ class EventsApiIT {
     @BeforeEach
     void clearEvents() {
         jdbc.execute("TRUNCATE TABLE security_events");
+        clock.set(NOW);
     }
 
     @Test
@@ -70,7 +79,9 @@ class EventsApiIT {
         JsonNode received = response.getBody().path("events").get(0);
         assertThat(Instant.parse(received.path("receivedAt").asText())).isEqualTo(NOW);
         ObjectNode original = received.deepCopy();
-        original.remove("receivedAt");
+        original.remove(List.of("receivedAt", "attackType", "threatScore"));
+        assertThat(received.path("attackType").asText()).isEqualTo("SQL/Command Injection");
+        assertThat(received.path("threatScore").asInt()).isEqualTo(75);
         assertThat(original).isEqualTo(event);
         assertThat(storedCount()).isEqualTo(1);
         String payload = jdbc.queryForObject("SELECT payload::text FROM security_events", String.class);
@@ -78,6 +89,9 @@ class EventsApiIT {
         OffsetDateTime receivedAt = jdbc.queryForObject(
                 "SELECT received_at FROM security_events", OffsetDateTime.class);
         assertThat(receivedAt.toInstant()).isEqualTo(NOW);
+        assertThat(jdbc.queryForObject("SELECT threat_score FROM security_events", Integer.class)).isEqualTo(75);
+        assertThat(jdbc.queryForObject("SELECT attack_type FROM security_events", String.class))
+                .isEqualTo("SQL/Command Injection");
     }
 
     @Test
@@ -273,6 +287,131 @@ class EventsApiIT {
         assertThat(ingest(batch).getStatusCode()).isEqualTo(HttpStatus.CREATED);
     }
 
+    @Test
+    void sixthEventInBatchReceivesRepeatBonus() throws Exception {
+        var batch = mapper.createArrayNode();
+        for (int index = 0; index < 7; index++) { batch.add(event("wave-" + index)); }
+        var response = ingest(batch);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        JsonNode events = response.getBody().path("events");
+        assertThat(events.get(4).path("threatScore").asInt()).isEqualTo(75);
+        assertThat(events.get(5).path("threatScore").asInt()).isEqualTo(90);
+        assertThat(events.get(6).path("threatScore").asInt()).isEqualTo(90);
+        assertThat(storedCount()).isEqualTo(7);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM security_events WHERE threat_score = 90", Long.class))
+                .isEqualTo(2);
+    }
+
+    @Test
+    void repeatWindowIncludesTenMinuteBoundaryAndExpiresOldArrivals() throws Exception {
+        seedRecentEvents(5);
+        clock.set(NOW.plusSeconds(600));
+        assertThat(score(ingest(event("boundary")))).isEqualTo(90);
+        clock.set(NOW.plusSeconds(601));
+        assertThat(score(ingest(event("expired")))).isEqualTo(75);
+    }
+
+    @Test
+    void repeatCountsSpanConfigurationsButKeepIpsSeparate() throws Exception {
+        seedRecentEvents(5);
+        ObjectNode differentConfig = event("other-config");
+        differentConfig.put("configId", 99);
+        assertThat(score(ingest(differentConfig))).isEqualTo(90);
+        ObjectNode otherIp = event("other-ip");
+        otherIp.put("clientIp", "203.0.113.99");
+        assertThat(score(ingest(otherIp))).isEqualTo(75);
+    }
+
+    @Test
+    void equivalentIpv6AddressesShareRepeatCounts() throws Exception {
+        var batch = mapper.createArrayNode();
+        for (int index = 0; index < 5; index++) {
+            ObjectNode event = event("v6-" + index);
+            event.put("clientIp", "2001:db8::1");
+            batch.add(event);
+        }
+        ingest(batch);
+        ObjectNode alternate = event("v6-alternate");
+        alternate.put("clientIp", "2001:0db8:0:0:0:0:0:1");
+        assertThat(score(ingest(alternate))).isEqualTo(90);
+    }
+
+    @Test
+    void failedBatchDoesNotAffectFutureRepeatCounts() throws Exception {
+        seedRecentEvents(4);
+        assertThat(ingest(List.of(event("new-one"), event("new-two"), event("seed-0"))).getStatusCode())
+                .isEqualTo(HttpStatus.CONFLICT);
+        assertThat(score(ingest(event("fifth")))).isEqualTo(75);
+        assertThat(score(ingest(event("sixth")))).isEqualTo(90);
+    }
+
+    @Test
+    void concurrentRequestsApplyRepeatBonusOnlyAfterFivePriorEvents() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(6);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (int index = 0; index < 6; index++) {
+                ObjectNode event = event("parallel-" + index);
+                results.add(executor.submit(() -> {
+                    start.await();
+                    return score(ingest(event));
+                }));
+            }
+            start.countDown();
+            List<Integer> scores = new ArrayList<>();
+            for (Future<Integer> result : results) { scores.add(result.get(20, TimeUnit.SECONDS)); }
+            assertThat(scores).containsExactlyInAnyOrder(75, 75, 75, 75, 75, 90);
+            assertThat(storedCount()).isEqualTo(6);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void overlappingMultiIpBatchesAcquireLocksWithoutDeadlock() throws Exception {
+        ObjectNode firstIp = event("a-1");
+        ObjectNode secondIp = event("b-1");
+        secondIp.put("clientIp", "203.0.113.99");
+        ObjectNode firstIpAgain = event("a-2");
+        ObjectNode secondIpAgain = event("b-2");
+        secondIpAgain.put("clientIp", "203.0.113.99");
+        CountDownLatch start = new CountDownLatch(1);
+        var first = CompletableFuture.supplyAsync(() -> {
+            await(start);
+            return ingest(List.of(firstIp, secondIp)).getStatusCode();
+        });
+        var second = CompletableFuture.supplyAsync(() -> {
+            await(start);
+            return ingest(List.of(secondIpAgain, firstIpAgain)).getStatusCode();
+        });
+        start.countDown();
+        assertThat(first.get(20, TimeUnit.SECONDS)).isEqualTo(HttpStatus.CREATED);
+        assertThat(second.get(20, TimeUnit.SECONDS)).isEqualTo(HttpStatus.CREATED);
+        assertThat(storedCount()).isEqualTo(4);
+    }
+
+    private static void await(CountDownLatch start) {
+        try {
+            start.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private void seedRecentEvents(int count) throws Exception {
+        var batch = mapper.createArrayNode();
+        for (int index = 0; index < count; index++) { batch.add(event("seed-" + index)); }
+        assertThat(ingest(batch).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
+    private int score(ResponseEntity<JsonNode> response) {
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        return response.getBody().path("events").get(0).path("threatScore").asInt();
+    }
+
     private long storedCount() {
         return jdbc.queryForObject("SELECT count(*) FROM security_events", Long.class);
     }
@@ -308,12 +447,21 @@ class EventsApiIT {
         return event;
     }
 
+    static class MutableClock extends Clock {
+        private final AtomicReference<Instant> now = new AtomicReference<>(NOW);
+
+        void set(Instant instant) { now.set(instant); }
+        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return now.get(); }
+    }
+
     @TestConfiguration
     static class ClockConfiguration {
         @Bean
         @Primary
-        Clock fixedClock() {
-            return Clock.fixed(NOW, ZoneOffset.UTC);
+        MutableClock fixedClock() {
+            return new MutableClock();
         }
     }
 }
