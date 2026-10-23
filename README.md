@@ -2,13 +2,14 @@
 
 A Java/Spring Boot security analytics backend, built incrementally for the Akamai assignment.
 
-## Current milestone: statistics summary
+## Current milestone: event samples
 
 Implemented: event model, single/batch ingestion, schema validation, server-assigned
 `receivedAt`, PostgreSQL persistence, atomic duplicate handling, attack classification
-and threat scoring, including concurrent repeat-offender detection, plus the statistics summary API.
+and threat scoring, including concurrent repeat-offender detection, the statistics summary API
+and filtered/paginated event samples.
 
-The samples API and data generation are subsequent milestones. The optional full-stack Docker setup will follow; Compose currently runs
+Data generation is the next required milestone. The optional full-stack Docker setup will follow; Compose currently runs
 PostgreSQL while the application runs locally.
 
 ## Requirements
@@ -42,7 +43,8 @@ curl -i -X POST http://localhost:8080/v1/events/ingest \
 The first request returns 201. Repeating it returns 409 because `eventId` is already
 stored. Change `eventId` to ingest another event.
 
-Inspect the stored records directly until the samples API is implemented:
+Retrieve stored events with `GET /v1/events/samples` (also available in Swagger),
+or inspect the records directly:
 
 ```bash
 docker compose exec db psql -U miniwsa -d miniwsa \
@@ -52,6 +54,25 @@ docker compose exec db psql -U miniwsa -d miniwsa \
 The named volume preserves data across app/database restarts. `docker compose down`
 stops the database and keeps its data. `docker compose down -v` also deletes its data;
 use that only when intentionally resetting your development database.
+
+### Automatic restart during development
+
+Spring Boot DevTools restarts the local application when compiled classes change.
+In VS Code, install **Extension Pack for Java**, open the repository root, and wait
+for Maven import to finish. Keep **Java: Autobuild Enabled** enabled (the default).
+Start the database using the command above, stop any existing app instance, then
+open `MiniWsaApplication.java` and click **Run** above `main`.
+
+Saving a Java file lets VS Code compile it and DevTools restart the application.
+Wait for the new `Started MiniWsaApplication` message before sending requests.
+Refresh Swagger UI after changing endpoints. If Maven dependencies change, reload
+the Java project and restart the application manually.
+
+When running through `./mvnw spring-boot:run` instead, DevTools still needs compiled
+classes: run `./mvnw compile` in another terminal if your editor is not compiling
+to the application's classpath. Saving source files alone does not trigger a restart.
+Run `./mvnw verify` before a commit; it is not required after every save.
+DevTools is automatically excluded from the packaged Spring Boot JAR.
 
 ### Configuration
 
@@ -149,6 +170,38 @@ and global `event_time` filtering, at the cost of additional work on inserts.
 same snapshot. An event inserted halfway through a summary cannot appear in only some
 breakdowns. A concurrent-ingestion integration test verifies this behavior.
 
+## Samples API
+
+`GET /v1/events/samples` returns individual enriched events. Every parameter is optional:
+`configId`, `from`, `to`, `category`, `action`, `limit` and `offset`.
+
+```bash
+curl 'http://localhost:8080/v1/events/samples?configId=14227&category=INJECTION&action=DENY&limit=2&offset=0'
+```
+
+The response has `total`, `limit`, `offset` and `events`. `total` counts all matching events
+before pagination; `events` contains the complete original fields plus stored `attackType`,
+`threatScore` and `receivedAt`. Reading a sample never recalculates its threat score.
+
+- `limit` defaults to 20, accepts 1-100, and rejects values outside that range with 400.
+- `offset` defaults to 0 and must be nonnegative.
+- Filters combine with AND. Either time bound may be omitted; both bounds are inclusive.
+- Results sort by original event timestamp descending, then event ID descending for stable ties.
+- No matches return 200 with zero and an empty list. An offset beyond the result set returns
+  an empty list while preserving the full matching total.
+- Invalid filters, enum values or pagination return 400 with a problem response.
+- In Swagger, find **Events -> GET /v1/events/samples** and leave unwanted filters blank.
+
+Filtering, ordering and pagination run in SQL. The application reads at most 100 event payloads
+per request. The exact count and page use one read-only repeatable-read transaction, so a
+concurrent insert cannot make the count and rows disagree within that response.
+
+V4 replaces the V3 time indexes with `(config_id, event_time DESC, event_id DESC)` and
+`(event_time DESC, event_id DESC)`, supporting stable ordering with and without a configuration.
+Category/action predicates use parameterized SQL; further indexes should follow measurements.
+Exact counts over broad ranges and deep offsets can still be costly. Offset pages can shift
+between separate requests as new events arrive; cursor pagination is a possible later extension.
+
 ## Architecture and file responsibilities
 
 One Maven project and one Git repository. Java package directories are not separate projects.
@@ -164,12 +217,16 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `domain/ClientIp.java`: IP literal validation and canonicalization.
 - `domain/EnrichedEvent.java`: original event plus classification, score and arrival time.
 - `domain/EnrichmentPolicy.java`: pure scoring calculation from event, prior count and arrival time.
-- `api/EventsController.java`: ingestion HTTP endpoint; delegates validation and persistence.
+- `api/EventsController.java`: ingestion and samples HTTP endpoints; delegates to their services.
 - `api/StatsController.java`: summary HTTP endpoint and Swagger parameter examples.
 - `domain/SummaryQuery.java`: validated configuration/time criteria.
 - `domain/StatsSummary.java`: typed summary result and its related result records.
 - `service/StatsService.java`: consistent read transaction and summary assembly.
 - `repository/StatsRepository.java`: parameterized aggregation and top-10 queries.
+- `domain/SamplesQuery.java`: optional filter criteria and pagination validation.
+- `domain/SamplesPage.java`: paginated result with the full matching total.
+- `service/SamplesService.java`: consistent count/page transaction.
+- `repository/SamplesRepository.java`: SQL filtering/count/pagination and stored-event mapping.
 - `api/IngestionRequestParser.java`: normalizes object/array input, parses and validates every event.
 - `api/IngestionResponse.java`: the HTTP success envelope.
 - `api/InvalidEventsException.java`: structured field validation failures.
@@ -182,6 +239,7 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `resources/db/migration/V1__create_security_events.sql`: Flyway's original table definition.
 - `resources/db/migration/V2__enrich_security_events.sql`: adds enrichment columns, an IP/time index and backfills existing data.
 - `resources/db/migration/V3__index_event_time_queries.sql`: configuration/time and global time indexes.
+- `resources/db/migration/V4__index_sample_ordering.sql`: extends those indexes with the event ID tie-breaker.
 - `MiniWsaApplication.java`: app entry point and injectable UTC clock.
 - `compose.yaml`: development PostgreSQL service, health check and persistent volume.
 - `.env.example`: example local configuration; `.env` itself is excluded from Git.
@@ -282,6 +340,8 @@ remain covered by HTTP tests.
 `StatsApiIT` verifies configuration/time filtering, inclusive boundaries, timezone offsets,
 counts, decimal averages, empty results, top-10 limits, deterministic ties, IPv6 grouping,
 query errors, Swagger documentation and consistent snapshots during concurrent ingestion.
+`SamplesApiIT` verifies defaults, page-size bounds, offsets, stable sorting, independent/combined
+filters, optional time bounds, unchanged enrichment, empty pages, Swagger and concurrent count/page consistency.
 
 The `IT` filename suffix makes Maven Failsafe run these tests during `verify`, while
 Surefire runs unit tests during `test`. No integration tests are silently skipped when
@@ -298,8 +358,8 @@ export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
 ## Milestones and next steps
 
 `v0.1-ingestion` marks durable ingestion and `v0.2-enrichment` marks classification and scoring.
-The summary API is ready for review before `v0.3-stats`. Next are the samples API and
-a realistic data generator.
+`v0.3-stats` marks the summary API. Samples are ready for review before `v0.4-samples`.
+Next is a realistic data generator, followed by complete-stack Docker support and final review.
 
 Current engineering challenges include atomic batches, duplicate requests and stable repeat-offender
 scores under concurrent ingestion. Transactions, database uniqueness and ordered IP locks address
