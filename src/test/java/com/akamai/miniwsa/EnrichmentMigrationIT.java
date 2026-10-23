@@ -59,7 +59,7 @@ class EnrichmentMigrationIT {
 
         var result = Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
-                .load().migrate();
+                .target("2").load().migrate();
 
         assertThat(result.migrationsExecuted).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM security_events", Long.class)).isEqualTo(14);

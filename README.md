@@ -2,13 +2,13 @@
 
 A Java/Spring Boot security analytics backend, built incrementally for the Akamai assignment.
 
-## Current milestone: classification and enrichment
+## Current milestone: statistics summary
 
 Implemented: event model, single/batch ingestion, schema validation, server-assigned
 `receivedAt`, PostgreSQL persistence, atomic duplicate handling, attack classification
-and threat scoring, including concurrent repeat-offender detection.
+and threat scoring, including concurrent repeat-offender detection, plus the statistics summary API.
 
-Summary/samples APIs and data generation are subsequent milestones. The optional full-stack Docker setup will follow; Compose currently runs
+The samples API and data generation are subsequent milestones. The optional full-stack Docker setup will follow; Compose currently runs
 PostgreSQL while the application runs locally.
 
 ## Requirements
@@ -115,6 +115,40 @@ The batch-count limit is checked after JSON parsing. A deployment should also li
 incoming request bytes before parsing. API retries are not silently deduplicated:
 a retry after a lost successful response will return 409 instead of counting the event twice.
 
+## Statistics summary API
+
+`GET /v1/stats/summary` requires `from` and `to` as ISO-8601 instants.
+`configId` is optional; omit it to aggregate across all configurations.
+
+```bash
+curl 'http://localhost:8080/v1/stats/summary?configId=14227&from=2026-05-20T00:00:00Z&to=2026-05-21T00:00:00Z'
+```
+
+It is also available under **Statistics** in Swagger UI at `/docs`.
+
+The response contains `configId`, `timeRange`, `totalEvents`, `byCategory` with counts and
+average threat scores, `byAction` with counts, `topAttackers` with counts/average scores,
+and `topTargetedPaths` with counts. Top lists return at most ten entries each.
+
+- Filters use the original event `timestamp`, not `receivedAt`. Both time bounds are inclusive.
+- Equal `from`/`to` is allowed. Reversed ranges, missing/invalid times and invalid configuration IDs return 400.
+- Explicit offsets are accepted and normalized to UTC. Encode a literal `+` in URL parameters as `%2B`;
+  Swagger handles encoding for you.
+- Averages are calculated in SQL using decimal arithmetic and rounded to one decimal place.
+- Top lists sort by count descending. Ties use numeric IP ordering or path ordering, respectively.
+- Equivalent IPv6 representations are grouped as one attacker.
+- Missing categories/actions are omitted. No matches return zero and empty maps/lists, not 404.
+
+All aggregation and top-10 selection execute in PostgreSQL. The application receives only
+bounded result groups, rather than loading raw events. Four focused queries keep the SQL
+readable; they still scan matching rows, so broad historical queries will need measurement
+and potentially rollups as data grows. Separate indexes support `(config_id, event_time)`
+and global `event_time` filtering, at the cost of additional work on inserts.
+
+`StatsService` uses a read-only repeatable-read transaction so every query observes the
+same snapshot. An event inserted halfway through a summary cannot appear in only some
+breakdowns. A concurrent-ingestion integration test verifies this behavior.
+
 ## Architecture and file responsibilities
 
 One Maven project and one Git repository. Java package directories are not separate projects.
@@ -130,7 +164,12 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `domain/ClientIp.java`: IP literal validation and canonicalization.
 - `domain/EnrichedEvent.java`: original event plus classification, score and arrival time.
 - `domain/EnrichmentPolicy.java`: pure scoring calculation from event, prior count and arrival time.
-- `api/EventsController.java`: HTTP endpoint; delegates validation and persistence.
+- `api/EventsController.java`: ingestion HTTP endpoint; delegates validation and persistence.
+- `api/StatsController.java`: summary HTTP endpoint and Swagger parameter examples.
+- `domain/SummaryQuery.java`: validated configuration/time criteria.
+- `domain/StatsSummary.java`: typed summary result and its related result records.
+- `service/StatsService.java`: consistent read transaction and summary assembly.
+- `repository/StatsRepository.java`: parameterized aggregation and top-10 queries.
 - `api/IngestionRequestParser.java`: normalizes object/array input, parses and validates every event.
 - `api/IngestionResponse.java`: the HTTP success envelope.
 - `api/InvalidEventsException.java`: structured field validation failures.
@@ -142,6 +181,7 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `resources/application.yml`: database connection and strict JSON settings.
 - `resources/db/migration/V1__create_security_events.sql`: Flyway's original table definition.
 - `resources/db/migration/V2__enrich_security_events.sql`: adds enrichment columns, an IP/time index and backfills existing data.
+- `resources/db/migration/V3__index_event_time_queries.sql`: configuration/time and global time indexes.
 - `MiniWsaApplication.java`: app entry point and injectable UTC clock.
 - `compose.yaml`: development PostgreSQL service, health check and persistent volume.
 - `.env.example`: example local configuration; `.env` itself is excluded from Git.
@@ -156,7 +196,7 @@ PostgreSQL provides durable storage, transactions, a uniqueness constraint and S
 aggregations in one dependency. Query dimensions are typed columns; the complete
 original event is JSONB. This supports future statistics without dropping original fields.
 The primary key supplies the uniqueness index. An additional `(client_ip, received_at, event_id)`
-index supports bounded repeat-offender lookups. Analytics indexes will be added with their queries.
+index supports bounded repeat-offender lookups. Summary queries add configuration/time and global time indexes.
 
 JDBC keeps the insert and future grouping queries explicit. There are no entity
 relationships or lazy-loading requirements here, so JPA/Hibernate would add machinery
@@ -194,7 +234,7 @@ The result is capped at 100; the maximum reachable under the current weights is 
 The assignment leaves some counting details implicit. This implementation uses these explicit rules:
 
 - The repeat window uses server arrival time (`receivedAt`), independently of the client's event timestamp.
-  Historical logs can therefore still form a current arrival burst. Future analytics will use event time.
+  Historical logs can therefore still form a current arrival burst. Summary queries use event time.
 - The current event is included in the threshold, so five prior arrivals qualify it for the bonus.
 - The interval is inclusive: `[receivedAt - 10 minutes, receivedAt]`.
 - Counts are global across configurations, keyed by canonical IP. Equivalent IPv6 spellings share counts.
@@ -239,6 +279,9 @@ IP literals and parameterized SQL handling. It also checks the sixth event in a 
 window boundaries, expiry, cross-configuration counts, equivalent IPv6 addresses, failed-batch
 count rollback, parallel scoring and overlapping multi-IP batches. Swagger schemas and examples
 remain covered by HTTP tests.
+`StatsApiIT` verifies configuration/time filtering, inclusive boundaries, timezone offsets,
+counts, decimal averages, empty results, top-10 limits, deterministic ties, IPv6 grouping,
+query errors, Swagger documentation and consistent snapshots during concurrent ingestion.
 
 The `IT` filename suffix makes Maven Failsafe run these tests during `verify`, while
 Surefire runs unit tests during `test`. No integration tests are silently skipped when
@@ -254,8 +297,9 @@ export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
 
 ## Milestones and next steps
 
-`v0.1-ingestion` marks durable ingestion. Classification and enrichment are ready for review
-before tagging `v0.2-enrichment`. Next are the statistics/samples APIs and a realistic data generator.
+`v0.1-ingestion` marks durable ingestion and `v0.2-enrichment` marks classification and scoring.
+The summary API is ready for review before `v0.3-stats`. Next are the samples API and
+a realistic data generator.
 
 Current engineering challenges include atomic batches, duplicate requests and stable repeat-offender
 scores under concurrent ingestion. Transactions, database uniqueness and ordered IP locks address
