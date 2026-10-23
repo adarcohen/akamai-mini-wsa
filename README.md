@@ -2,11 +2,15 @@
 
 A Java and Spring Boot security analytics backend, built incrementally for the Akamai assignment.
 
-## Current stage: event model and validation
+## Current stage: ingestion HTTP contract
 
-This stage contains a runnable Spring Boot web application, the security event model
-and unit tests for its validation rules. Event ingestion, storage, enrichment,
-analytics and Docker setup will be introduced in subsequent stages.
+This stage accepts single events or batches over HTTP, validates them and returns their
+server-assigned arrival timestamps. It includes model validation and real HTTP integration tests.
+
+**This is an intermediate implementation: accepted events are returned but are not persisted.**
+There is no cross-request deduplication yet. PostgreSQL persistence is the next stage;
+the `v0.1-ingestion` milestone will only be tagged after storage is implemented.
+Classification, scoring, analytics and Docker setup will follow.
 
 ## Requirements
 
@@ -30,11 +34,11 @@ On Windows, use `mvnw.cmd` instead of `./mvnw`.
 The application starts on port 8080. Look for `Started MiniWsaApplication` in the logs.
 Stop it with `Ctrl+C`.
 
-There are no API endpoints yet. This command should return HTTP 404, confirming that
-an HTTP server is responding but no route has been implemented:
+The root path has no route and returns HTTP 404. To exercise ingestion, use the example below:
 
 ```bash
-curl -i http://localhost:8080/
+curl -i -X POST http://localhost:8080/v1/events/ingest \
+  -H 'Content-Type: application/json' --data-binary @examples/event.json
 ```
 
 You can also run the packaged application:
@@ -72,10 +76,11 @@ HTTP status bounds, nonnegative byte counts and string limits. `@Valid` also che
 nested rule and location fields. `timestamp` uses `Instant` to represent a point in time.
 Wrapper types such as `Long` allow validation to distinguish a missing value from zero.
 Creating a record alone does not run validation: callers must invoke a validator.
-The next stage will connect this validation to the ingestion API.
+The ingestion parser invokes this validation for every event before generating a success response.
 
-IP syntax, JSON enum/timestamp parsing and HTTP error responses are not validated by
-these unit tests; those API boundary checks will be implemented with ingestion.
+HTTP integration tests cover enum/timestamp parsing, strict JSON types and validation errors.
+IP fields currently require a nonblank string with a maximum length; IP literal syntax validation
+will be added with persistence and IP-based processing.
 
 Run the current tests without Docker or a database:
 
@@ -83,8 +88,40 @@ Run the current tests without Docker or a database:
 ./mvnw test
 ```
 
+## Ingestion endpoint
+
+`POST /v1/events/ingest` accepts one event object or an array of 1-1000 events.
+Success returns HTTP 201 with `accepted` and an `events` array. Each response event
+contains its original fields and `receivedAt`, assigned once per request using a UTC clock.
+The clock is injected so tests can verify exact timestamps without sleeping.
+
+Malformed JSON, invalid body shapes, missing required fields, unknown enums/properties,
+numeric timestamps, incorrect scalar types and duplicate IDs within one batch return HTTP 400.
+A whole batch must validate before any success response is produced. Timestamp strings must
+contain an ISO-8601 date/time and an explicit offset or `Z`.
+
+Validation errors use `application/problem+json`. The `errors` array identifies the array
+index and field, such as `events[1].rule.severity`, without echoing rejected values.
+
+The `api/` package contains:
+
+- `EventsController`: the route and success response, currently without persistence.
+- `IngestionRequestParser`: single/batch normalization, JSON conversion and validation.
+- `IngestionResponse`: the success response structure.
+- `InvalidEventsException`: validation failures and their field details.
+- `ApiExceptionHandler`: maps invalid requests to HTTP 400 problem responses.
+- `IsoInstantDeserializer`: requires ISO-8601 strings instead of numeric epoch values.
+
+`src/main/resources/application.yml` makes JSON type/enum/property validation strict.
+`examples/event.json` is a complete request body for manual testing.
+`EventsApiTest` starts the real application on a random port and sends HTTP requests;
+these integration tests need neither Docker nor a database at this stage.
+
+The 1000-event limit applies after JSON parsing. An incoming byte-size limit will also
+be needed before exposing this API to untrusted traffic.
+
 ## Next stage
 
-Implement the ingestion endpoint, single/batch JSON parsing and API validation tests.
+Add PostgreSQL persistence, cross-request duplicate handling and database integration tests.
 The `v0.1-ingestion` tag will be added only once that milestone is working.
 Each stage will be reviewed and committed independently.
