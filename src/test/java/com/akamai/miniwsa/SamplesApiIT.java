@@ -227,6 +227,9 @@ class SamplesApiIT {
         assertThat(operation.path("parameters").size()).isEqualTo(7);
         for (JsonNode parameter : operation.path("parameters")) {
             assertThat(parameter.path("required").asBoolean()).isFalse();
+            if (List.of("limit", "offset").contains(parameter.path("name").asText())) {
+                assertThat(parameter.path("schema").path("type").asText()).isEqualTo("integer");
+            }
         }
         assertThat(operation.path("responses").path("200").toString()).contains("SamplesPage");
         JsonNode properties = document.path("components").path("schemas").path("SamplesPage").path("properties");

@@ -5,14 +5,14 @@ import com.akamai.miniwsa.domain.EnrichedEvent;
 import com.akamai.miniwsa.domain.SecurityEvent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.ZoneOffset;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.HashMap;
-import java.util.Map;
-import org.springframework.jdbc.support.SqlArrayValue;
 import java.util.List;
+import java.util.Map;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.support.SqlArrayValue;
 import org.springframework.stereotype.Repository;
 
 @Repository

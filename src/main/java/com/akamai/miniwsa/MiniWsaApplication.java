@@ -1,16 +1,16 @@
 package com.akamai.miniwsa;
 
-import java.time.Clock;
 import io.swagger.v3.oas.annotations.OpenAPIDefinition;
 import io.swagger.v3.oas.annotations.info.Info;
-import org.springframework.context.annotation.Bean;
+import java.time.Clock;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
 
 @OpenAPIDefinition(info = @Info(
         title = "Mini WSA API",
         version = "0.1.0",
-        description = "Security event ingestion and analytics. Currently supports durable event ingestion."))
+        description = "Security event ingestion, classification, threat scoring, summary statistics, samples and time-series analytics."))
 @SpringBootApplication
 public class MiniWsaApplication {
 

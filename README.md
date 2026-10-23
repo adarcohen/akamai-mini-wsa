@@ -7,7 +7,7 @@ A Java/Spring Boot security analytics backend, built incrementally for the Akama
 Implemented: event model, single/batch ingestion, schema validation, server-assigned
 `receivedAt`, PostgreSQL persistence, atomic duplicate handling, attack classification
 and threat scoring, including concurrent repeat-offender detection, the statistics summary API
-and filtered/paginated event samples.
+and filtered/paginated event samples, plus the optional time-series API.
 
 Data generation is available through a standalone script. Docker Compose can run the
 full stack, or only PostgreSQL while the application runs locally.
@@ -134,6 +134,45 @@ java -jar target/mini-wsa-0.1.0-SNAPSHOT.jar
 ```
 
 On Windows use `mvnw.cmd` instead of `./mvnw`. Run one instance per port.
+
+## Time-series API (optional bonus)
+
+```bash
+curl --get http://localhost:8080/v1/stats/timeseries \
+  --data-urlencode 'from=2026-05-20T00:00:00Z' \
+  --data-urlencode 'to=2026-05-20T05:00:00Z' \
+  --data-urlencode 'interval=5m'
+```
+
+`from`, `to` and `interval` are required; `configId` is optional. Supported intervals
+are exactly `1m`, `5m`, and `1h`. Timestamps must include a timezone and fall within
+years 0001–9999. Invalid parameters, reversed ranges and ranges exceeding **2000
+buckets** return HTTP 400 before querying storage.
+
+The response includes `configId` (null for all configurations), `timeRange`,
+`interval`, `totalEvents` and ascending `buckets`, each with `timestamp` and `count`.
+Buckets align to UTC clock boundaries: `5m` produces 00:00, 00:05, 00:10, etc.
+Offsets are normalized to UTC, and daylight-saving transitions do not change bucket widths.
+Empty buckets contain count zero. A single-instant range returns one bucket.
+
+Event-time filtering is inclusive, matching summary/samples. Only events within the
+requested range count; the first/last bucket may therefore be partial. An event exactly
+at `to` is included, even if `to` is a bucket boundary: that final bucket is returned.
+Consequently adjacent requests sharing an inclusive boundary can count the same boundary
+event; use disjoint ranges when combining results. PostgreSQL stores microsecond precision;
+sub-microsecond query bounds are rounded inward so parameter conversion does not widen them.
+
+One SQL aggregation uses PostgreSQL `date_bin` with an explicit UTC origin and bound
+parameters. The range predicates remain on the original indexed `event_time` column.
+The service fills at most 2000 bucket positions, without fetching event payloads.
+`totalEvents` is the sum of that same query's counts, so it is consistent with the buckets.
+The existing indexes support this query; no additional migration is needed.
+The bucket cap limits response size, not scanned rows: large datasets still require
+query-plan measurements, retention/partitioning or pre-aggregation as appropriate.
+
+With the 10,000-event generator example, the 00:00–05:00 range includes all generated
+events and excludes the three manual examples at 14:32. Its `totalEvents` should be
+10000 after one generator run. Try `interval=1m` to see the attack bursts and zero gaps.
 
 ## Generate test data
 
@@ -430,6 +469,9 @@ remain covered by HTTP tests.
 `StatsApiIT` verifies configuration/time filtering, inclusive boundaries, timezone offsets,
 counts, decimal averages, empty results, top-10 limits, deterministic ties, IPv6 grouping,
 query errors, Swagger documentation and consistent snapshots during concurrent ingestion.
+`TimeSeriesApiIT` verifies interval alignment, UTC/DST handling, clipped edge buckets,
+empty buckets, inclusive and sub-microsecond bounds, configuration filters, pre-epoch times,
+attack waves, request limits and OpenAPI documentation.
 `SamplesApiIT` verifies defaults, page-size bounds, offsets, stable sorting, independent/combined
 filters, optional time bounds, unchanged enrichment, empty pages, Swagger and concurrent count/page consistency.
 
@@ -450,7 +492,7 @@ export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
 `v0.1-ingestion` marks durable ingestion and `v0.2-enrichment` marks classification and scoring.
 `v0.3-stats` marks the summary API, `v0.4-samples` the samples API, and
 `v0.5-generator` the data generator. Full-stack Docker support is ready for review.
-Next are final review and an optional bonus endpoint.
+The optional time-series analytics endpoint is also implemented and ready for review.
 
 Current engineering challenges include atomic batches, duplicate requests and stable repeat-offender
 scores under concurrent ingestion. Transactions, database uniqueness and ordered IP locks address
@@ -460,5 +502,5 @@ The injected clock makes arrival-time tests deterministic without sleeps.
 Additional production concerns include tenant authorization, authentication, external
 secrets, request-size limits, observability, clock-skew policy and accepted timestamp ranges.
 The required endpoints and generator are implemented, together with optional full-stack Compose.
-An optional analytics bonus can be added after review. Small commits and milestone tags remain review steps;
+The time-series endpoint implements the optional analytics bonus. Small commits and milestone tags remain review steps;
 no Git push or submission email is performed by the application.
