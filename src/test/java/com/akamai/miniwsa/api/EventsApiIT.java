@@ -141,6 +141,35 @@ class EventsApiIT {
         assertThat(ingest(valid).getStatusCode()).isEqualTo(HttpStatus.CREATED);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "2026-05-20T14:32:10.000000001Z",
+            "2026-05-20T14:32:10.123456789Z",
+            "2026-05-20T14:32:10.999999999Z"
+    })
+    void rejectsEventTimePrecisionThatCannotBeStoredExactly(String timestamp) throws Exception {
+        ObjectNode item = event("sub-microsecond");
+        item.put("timestamp", timestamp);
+        var response = ingest(List.of(event("valid-precision"), item));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().path("errors").toString()).contains("events[1].timestamp");
+        assertThat(storedCount()).isZero();
+    }
+
+    @Test
+    void preservesMicrosecondEventTimeAndFindsItUsingExactOriginalBounds() throws Exception {
+        String timestamp = "2026-05-20T14:32:10.123456Z";
+        ObjectNode item = event("exact-microsecond");
+        item.put("timestamp", timestamp);
+        var response = ingest(item);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody().path("events").get(0).path("timestamp").asText()).isEqualTo(timestamp);
+        var page = http.getForEntity("/v1/events/samples?from=" + timestamp + "&to=" + timestamp, JsonNode.class);
+        assertThat(page.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(page.getBody().path("total").asLong()).isEqualTo(1);
+        assertThat(page.getBody().path("events").get(0).path("timestamp").asText()).isEqualTo(timestamp);
+    }
+
     @Test
     void acceptsSingleEventAndAssignsServerTimestamp() throws Exception {
         ObjectNode event = event("one");

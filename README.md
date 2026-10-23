@@ -98,8 +98,10 @@ curl --get http://localhost:8080/v1/stats/timeseries \
 Query time bounds are inclusive and use the original event timestamp. Omit `configId`
 to query all configurations. Time-series edge buckets can be partial, and a bucket
 starting exactly at `to` is included. All API timestamps must be within years 0001–9999.
-PostgreSQL time columns have microsecond precision; query bounds round inward to avoid
-including records outside the requested interval.
+Ingested event timestamps must have at most microsecond precision (six fractional digits);
+higher effective precision returns 400, preventing silent rounding of the original timestamp.
+Query bounds may be more precise and round inward to PostgreSQL microseconds, avoiding
+records outside the requested interval.
 Full request/response schemas and examples are available in Swagger UI.
 
 Errors use Problem Details: 400 for invalid input, 409 for stored duplicate IDs,
@@ -155,7 +157,7 @@ To run the packaged app: `./mvnw package -DskipTests`, then
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-The current suite has 238 Java tests and four generator tests, covering classification,
+The current suite has 242 Java tests and four generator tests, covering classification,
 scoring, validation, rollback, concurrency, migrations, query consistency and time boundaries.
 A clean-source build and an isolated full-stack startup were verified, including data
 persistence across restarts. The Docker image build skips tests; run `verify` separately.

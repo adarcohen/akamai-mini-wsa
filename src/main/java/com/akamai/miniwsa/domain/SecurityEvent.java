@@ -37,9 +37,9 @@ public record SecurityEvent(
     }
 
     @JsonIgnore
-    @AssertTrue(message = "must be within years 0001 through 9999")
+    @AssertTrue(message = "must be within years 0001 through 9999 with at most microsecond precision")
     public boolean isTimestampSupported() {
-        return EventTime.isSupported(timestamp);
+        return EventTime.isStorable(timestamp);
     }
 
     public record Rule(
