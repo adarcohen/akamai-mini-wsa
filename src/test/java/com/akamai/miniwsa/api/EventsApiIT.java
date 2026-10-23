@@ -239,6 +239,37 @@ class EventsApiIT {
         assertThat(storedCount()).isEqualTo(1);
     }
 
+    @Test
+    void servesSwaggerUiAtDocs() {
+        var docs = http.getForEntity("/docs", String.class);
+        assertThat(docs.getStatusCode().value()).isIn(200, 302);
+        var ui = http.getForEntity("/swagger-ui/index.html", String.class);
+        assertThat(ui.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(ui.getBody()).contains("swagger-ui-bundle.js");
+    }
+
+    @Test
+    void documentsSingleAndBatchRequestsWithUsableExamples() throws Exception {
+        var response = http.getForEntity("/v3/api-docs", JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode document = response.getBody();
+        assertThat(document.path("info").path("title").asText()).isEqualTo("Mini WSA API");
+        JsonNode operation = document.path("paths").path("/v1/events/ingest").path("post");
+        JsonNode body = operation.path("requestBody").path("content").path("application/json");
+        JsonNode alternatives = body.path("schema").path("oneOf");
+        assertThat(alternatives.size()).isEqualTo(2);
+        assertThat(alternatives.toString()).contains("SecurityEvent", "array");
+        assertThat(operation.path("responses").has("201")).isTrue();
+        assertThat(operation.path("responses").has("400")).isTrue();
+        assertThat(operation.path("responses").has("409")).isTrue();
+        JsonNode single = body.path("examples").path("Single event").path("value");
+        JsonNode batch = body.path("examples").path("Batch of events").path("value");
+        assertThat(ingest(single).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(ingest(single).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        ((ObjectNode) batch.get(0)).put("eventId", "evt-docs-batch-001");
+        assertThat(ingest(batch).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
     private long storedCount() {
         return jdbc.queryForObject("SELECT count(*) FROM security_events", Long.class);
     }

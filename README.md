@@ -77,6 +77,16 @@ java -jar target/mini-wsa-0.1.0-SNAPSHOT.jar
 
 On Windows use `mvnw.cmd` instead of `./mvnw`. Run one instance per port.
 
+## Interactive API documentation
+
+After starting the app, open [Swagger UI](http://localhost:8080/docs).
+Expand **Events**, select **POST /v1/events/ingest**, click **Try it out**, choose the single
+or batch example, edit the body and click **Execute**. These are real requests that persist
+records; use a new `eventId` after each successful submission or expect HTTP 409.
+
+The OpenAPI document is available at `/v3/api-docs`. It describes both request shapes,
+required event fields, enum values, success responses and HTTP 400/409/503 errors.
+
 ## Ingestion API
 
 `POST /v1/events/ingest` accepts one event object or a nonempty array of up to 1000 events.
@@ -125,6 +135,7 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `api/InvalidEventsException.java`: structured field validation failures.
 - `api/ApiExceptionHandler.java`: maps validation, conflicts and temporary storage failures to HTTP errors.
 - `api/IsoInstantDeserializer.java`: requires ISO-8601 timestamp strings.
+- `api/IngestionExamples.java`: single and batch request examples for Swagger UI.
 - `service/IngestionService.java`: assigns arrival times and owns the all-or-nothing transaction.
 - `repository/EventRepository.java`: parameterized, batched JDBC inserts; contains no HTTP logic.
 - `resources/application.yml`: database connection and strict JSON settings.
