@@ -16,3 +16,7 @@ replay_pid*
 .env
 .env.*
 !.env.example
+
+# Generated local test data / Python cache
+/generated/
+__pycache__/

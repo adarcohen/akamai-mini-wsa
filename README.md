@@ -9,7 +9,7 @@ Implemented: event model, single/batch ingestion, schema validation, server-assi
 and threat scoring, including concurrent repeat-offender detection, the statistics summary API
 and filtered/paginated event samples.
 
-Data generation is the next required milestone. The optional full-stack Docker setup will follow; Compose currently runs
+Data generation is available through a standalone script. The optional full-stack Docker setup will follow; Compose currently runs
 PostgreSQL while the application runs locally.
 
 ## Requirements
@@ -97,6 +97,58 @@ java -jar target/mini-wsa-0.1.0-SNAPSHOT.jar
 ```
 
 On Windows use `mvnw.cmd` instead of `./mvnw`. Run one instance per port.
+
+## Generate test data
+
+Python 3.9+ is needed only for the standalone generator; no Python packages are required.
+Generate 10,000 events in 20 JSON arrays of 500 events:
+
+```bash
+python3 scripts/generate_events.py --count 10000 --seed 42 \
+  --start 2026-05-20T00:00:00Z --output generated/demo-001
+```
+
+Each file is ready for `POST /v1/events/ingest`. With the app running, submit them
+in order from a Bash or Zsh terminal, stopping immediately on an HTTP/network error:
+
+```bash
+for batch in generated/demo-001/batch-*.json; do
+  curl --fail-with-body --silent --show-error \
+    -X POST http://localhost:8080/v1/events/ingest \
+    -H 'Content-Type: application/json' --data-binary "@$batch" \
+    -o /tmp/mini-wsa-ingest-response.json || break
+done
+```
+
+Inspect `/tmp/mini-wsa-ingest-response.json` for the last response. Each batch is an
+independent transaction: an error does not roll back earlier successful batches.
+Do not resend successful files: their event IDs will produce HTTP 409. For another
+run, choose a new output directory; existing directories are refused to avoid mixing
+batches. New runs receive unique UUID prefixes, even with the same seed.
+
+Options: `--count` (positive, default 10000), `--batch-size` (1–1000, default 500),
+`--seed` (default 42), `--start` (timezone-aware ISO-8601, default current UTC),
+and required `--output` (new directory). The same seed and start reproduce event
+content apart from the unique event IDs. Generation holds only one batch in memory.
+
+The stream spans three configurations, all seven categories and all three actions.
+Every 200-event block starts with a 50-event wave over five simulated seconds,
+sharing an IP, path, category and configuration. Waves rotate between injection,
+credential bots and denial of service, interleaved with background security events.
+Small requested counts can contain only part of a wave and need not cover every category.
+IPs use documentation-only ranges, and hostnames use `example.com`.
+
+Client timestamps model the attack timeline. Repeat-offender scoring uses actual
+server `receivedAt`, so fast ingestion of a long simulated timeline still falls
+within the server's current ten-minute window. The generator never supplies enrichment
+fields. Query summary/samples with the generated **event timestamp** range; the default
+10,000-event example finishes before `2026-05-21T00:00:00Z`.
+
+Test the generator separately:
+
+```bash
+python3 -m unittest discover -s scripts -p 'test_*.py'
+```
 
 ## Interactive API documentation
 
