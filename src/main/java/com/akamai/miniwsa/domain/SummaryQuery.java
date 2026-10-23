@@ -10,6 +10,8 @@ public record SummaryQuery(Long configId, Instant from, Instant to) {
         if (from.isAfter(to)) {
             throw new IllegalArgumentException("from must be before or equal to to");
         }
+        EventTime.requireSupported(from, "from");
+        EventTime.requireSupported(to, "to");
         if (configId != null && configId <= 0) {
             throw new IllegalArgumentException("configId must be positive");
         }

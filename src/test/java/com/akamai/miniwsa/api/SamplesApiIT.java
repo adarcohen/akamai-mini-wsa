@@ -1,9 +1,9 @@
-package com.akamai.miniwsa;
+package com.akamai.miniwsa.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
-
+import com.akamai.miniwsa.EventFixtures;
 import com.akamai.miniwsa.domain.Action;
 import com.akamai.miniwsa.domain.Category;
 import com.akamai.miniwsa.domain.SamplesQuery;
@@ -61,6 +61,24 @@ class SamplesApiIT {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+    }
+
+    @Test
+    void roundsSubMicrosecondBoundsInwardAndRejectsUnsupportedYears() {
+        ingest(List.of(
+                EventFixtures.event("before", "203.0.113.1", Instant.parse("2026-05-20T00:00:00Z"), 14227,
+                        Severity.LOW, Action.MONITOR, Category.BOT, "/"),
+                EventFixtures.event("middle", "203.0.113.1", Instant.parse("2026-05-20T00:00:00.000001Z"), 14227,
+                        Severity.LOW, Action.MONITOR, Category.BOT, "/"),
+                EventFixtures.event("after", "203.0.113.1", Instant.parse("2026-05-20T00:00:00.000002Z"), 14227,
+                        Severity.LOW, Action.MONITOR, Category.BOT, "/")));
+        JsonNode result = samples("from=2026-05-20T00:00:00.0000001Z&to=2026-05-20T00:00:00.0000019Z");
+        assertThat(result.path("total").asLong()).isEqualTo(1);
+        JsonNode empty = samples("from=2026-05-20T00:00:00.0000001Z&to=2026-05-20T00:00:00.0000009Z");
+        assertThat(empty.path("total").asLong()).isZero();
+        var invalid = http.getForEntity("/v1/events/samples"
+                + "?from=0000-01-01T00:00:00Z&to=2026-05-20T00:00:00Z", JsonNode.class);
+        assertThat(invalid.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @BeforeEach

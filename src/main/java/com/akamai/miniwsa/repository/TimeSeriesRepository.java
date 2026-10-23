@@ -3,8 +3,6 @@ package com.akamai.miniwsa.repository;
 import com.akamai.miniwsa.domain.TimeSeriesQuery;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.Map;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -27,16 +25,10 @@ public class TimeSeriesRepository {
                 FROM security_events
                 WHERE event_time >= :from AND event_time <= :to
                 """;
-        // PostgreSQL stores microseconds. Round inward so driver rounding cannot widen the range.
-        Instant lowerBound = query.from().truncatedTo(ChronoUnit.MICROS);
-        if (lowerBound.isBefore(query.from())) {
-            lowerBound = lowerBound.plus(1, ChronoUnit.MICROS);
-        }
-        Instant upperBound = query.to().truncatedTo(ChronoUnit.MICROS);
         MapSqlParameterSource parameters = new MapSqlParameterSource()
                 .addValue("stride", query.interval().seconds() + " seconds")
-                .addValue("from", lowerBound.atOffset(ZoneOffset.UTC))
-                .addValue("to", upperBound.atOffset(ZoneOffset.UTC));
+                .addValue("from", SqlTimestamps.lowerBound(query.from()))
+                .addValue("to", SqlTimestamps.upperBound(query.to()));
         if (query.configId() != null) {
             sql += " AND config_id = :configId";
             parameters.addValue("configId", query.configId());

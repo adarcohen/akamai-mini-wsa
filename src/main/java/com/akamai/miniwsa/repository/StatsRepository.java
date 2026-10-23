@@ -6,7 +6,6 @@ import com.akamai.miniwsa.domain.StatsSummary.Attacker;
 import com.akamai.miniwsa.domain.StatsSummary.CategoryStats;
 import com.akamai.miniwsa.domain.StatsSummary.TargetedPath;
 import com.akamai.miniwsa.domain.SummaryQuery;
-import java.time.ZoneOffset;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -66,8 +65,8 @@ public class StatsRepository {
     private Filter filter(SummaryQuery query) {
         String sql = " WHERE event_time >= :from AND event_time <= :to";
         MapSqlParameterSource parameters = new MapSqlParameterSource()
-                .addValue("from", query.from().atOffset(ZoneOffset.UTC))
-                .addValue("to", query.to().atOffset(ZoneOffset.UTC));
+                .addValue("from", SqlTimestamps.lowerBound(query.from()))
+                .addValue("to", SqlTimestamps.upperBound(query.to()));
         if (query.configId() != null) {
             sql += " AND config_id = :configId";
             parameters.addValue("configId", query.configId());

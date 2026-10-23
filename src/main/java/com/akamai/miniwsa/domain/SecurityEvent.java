@@ -36,6 +36,12 @@ public record SecurityEvent(
         return clientIp == null || ClientIp.isValid(clientIp);
     }
 
+    @JsonIgnore
+    @AssertTrue(message = "must be within years 0001 through 9999")
+    public boolean isTimestampSupported() {
+        return EventTime.isSupported(timestamp);
+    }
+
     public record Rule(
             @NotBlank @Size(max = 128) String id,
             @NotBlank @Size(max = 128) String name,

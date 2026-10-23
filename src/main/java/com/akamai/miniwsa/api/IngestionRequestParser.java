@@ -51,10 +51,14 @@ public class IngestionRequestParser {
                 errors.add(new FieldError(prefix, "must be an object"));
                 continue;
             }
+            if (!validateText(node, prefix, errors)) {
+                continue;
+            }
             try {
                 SecurityEvent event = mapper.treeToValue(node, SecurityEvent.class);
                 validator.validate(event).forEach(violation -> errors.add(new FieldError(
-                        prefix + "." + violation.getPropertyPath().toString().replace("clientIpValid", "clientIp"),
+                        prefix + "." + violation.getPropertyPath().toString()
+                                .replace("clientIpValid", "clientIp").replace("timestampSupported", "timestamp"),
                         violation.getMessage())));
                 if (!ids.add(event.eventId())) {
                     errors.add(new FieldError(prefix + ".eventId", "duplicate eventId in batch"));
@@ -74,5 +78,43 @@ public class IngestionRequestParser {
             throw new InvalidEventsException(errors);
         }
         return List.copyOf(events);
+    }
+
+    private boolean validateText(JsonNode node, String field, List<FieldError> errors) {
+        if (node.isTextual() && containsInvalidUnicode(node.textValue())) {
+            errors.add(new FieldError(field, "must contain valid Unicode without null characters"));
+            return false;
+        } else if (node.isContainerNode()) {
+            boolean valid = true;
+            if (node.isObject()) {
+                var fields = node.fields();
+                while (fields.hasNext()) {
+                    var entry = fields.next();
+                    valid &= validateText(entry.getValue(), field + "." + entry.getKey(), errors);
+                }
+            } else {
+                for (int index = 0; index < node.size(); index++) {
+                    valid &= validateText(node.get(index), field + "[" + index + "]", errors);
+                }
+            }
+            return valid;
+        }
+        return true;
+    }
+
+    private boolean containsInvalidUnicode(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character == 0 || Character.isLowSurrogate(character)) {
+                return true;
+            }
+            if (Character.isHighSurrogate(character)) {
+                if (index + 1 == value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                    return true;
+                }
+                index++;
+            }
+        }
+        return false;
     }
 }

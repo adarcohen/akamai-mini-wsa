@@ -5,6 +5,8 @@ import java.time.Instant;
 public record SamplesQuery(
         Long configId, Instant from, Instant to, Category category, Action action, int limit, int offset) {
     public SamplesQuery {
+        EventTime.requireSupported(from, "from");
+        EventTime.requireSupported(to, "to");
         if (configId != null && configId <= 0) {
             throw new IllegalArgumentException("configId must be positive");
         }

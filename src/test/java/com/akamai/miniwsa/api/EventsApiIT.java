@@ -1,32 +1,29 @@
 package com.akamai.miniwsa.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
-
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
+import com.akamai.miniwsa.repository.EventRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicReference;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.OffsetDateTime;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.List;
-import org.junit.jupiter.api.Test;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,11 +33,19 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -52,6 +57,7 @@ class EventsApiIT {
     @Autowired private ObjectMapper mapper;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private MutableClock clock;
+    @MockitoSpyBean private EventRepository repository;
 
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -67,6 +73,72 @@ class EventsApiIT {
     void clearEvents() {
         jdbc.execute("TRUNCATE TABLE security_events");
         clock.set(NOW);
+    }
+
+    @Test
+    void transientFailureAfterWritesRollsBackAndReturnsSafe503() throws Exception {
+        doAnswer(call -> {
+            call.callRealMethod();
+            throw new TransientDataAccessResourceException("sensitive SQL SELECT internal_secret");
+        }).when(repository).saveAll(anyList());
+        var response = ingest(List.of(event("transient-one"), event("transient-two")));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody().path("detail").asText()).contains("temporarily unavailable");
+        assertThat(response.getBody().toString()).doesNotContain("internal_secret", "SELECT", "stackTrace");
+        assertThat(storedCount()).isZero();
+        doCallRealMethod().when(repository).saveAll(anyList());
+        assertThat(score(ingest(event("after-transient")))).isEqualTo(75);
+    }
+
+    @Test
+    void unexpectedDatabaseConstraintFailureRollsBackWithoutLeakingDetails() throws Exception {
+        jdbc.execute("ALTER TABLE security_events ADD CONSTRAINT test_storage_failure "
+                + "CHECK (event_id <> 'invalid-storage')");
+        try {
+            var response = ingest(List.of(event("valid-storage"), event("invalid-storage")));
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+            assertThat(response.getBody().path("detail").asText()).isEqualTo("An unexpected storage error occurred");
+            assertThat(response.getBody().toString()).doesNotContain(
+                    "test_storage_failure", "security_events", "INSERT", "invalid-storage", "stackTrace");
+            assertThat(storedCount()).isZero();
+        } finally {
+            jdbc.execute("ALTER TABLE security_events DROP CONSTRAINT test_storage_failure");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0000-01-01T00:00:00Z", "+300000-01-01T00:00:00Z", "+1000000000-01-01T00:00:00Z"})
+    void rejectsUnsupportedTimestampRangeWithoutWriting(String timestamp) throws Exception {
+        ObjectNode item = event("unsupported-time");
+        item.put("timestamp", timestamp);
+        var response = ingest(item);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().path("errors").toString()).contains("events[0].timestamp");
+        assertThat(storedCount()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eventId", "path", "userAgent", "rule.message", "geoLocation.city"})
+    void rejectsNullCharactersInTopLevelAndNestedFieldsBeforeBatchWrites(String field) throws Exception {
+        ObjectNode item = event("invalid-text");
+        String[] parts = field.split("\\.");
+        ObjectNode parent = parts.length == 1 ? item : (ObjectNode) item.path(parts[0]);
+        parent.put(parts[parts.length - 1], "text" + (char) 0 + "suffix");
+        var response = ingest(List.of(event("valid-text"), item));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().path("errors").toString()).contains("events[1]." + field);
+        assertThat(storedCount()).isZero();
+    }
+
+    @Test
+    void rejectsUnpairedSurrogatesButAcceptsValidSupplementaryUnicode() throws Exception {
+        ObjectNode invalid = event("invalid-unicode");
+        invalid.put("userAgent", "agent-" + (char) 0xd800);
+        assertThat(ingest(invalid).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(storedCount()).isZero();
+        ObjectNode valid = event("valid-unicode");
+        valid.put("userAgent", "agent-" + new String(Character.toChars(0x1f600)));
+        assertThat(ingest(valid).getStatusCode()).isEqualTo(HttpStatus.CREATED);
     }
 
     @Test
@@ -310,6 +382,26 @@ class EventsApiIT {
         assertThat(score(ingest(event("boundary")))).isEqualTo(90);
         clock.set(NOW.plusSeconds(601));
         assertThat(score(ingest(event("expired")))).isEqualTo(75);
+    }
+
+    @Test
+    void outOfOrderClientTimestampsDoNotChangeArrivalWindowOrBatchOrder() throws Exception {
+        var batch = mapper.createArrayNode();
+        for (int index = 0; index < 6; index++) {
+            ObjectNode item = event("out-of-order-" + index);
+            item.put("timestamp", NOW.minusSeconds(index * 86400L).toString());
+            batch.add(item);
+        }
+        var response = ingest(batch);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        JsonNode received = response.getBody().path("events");
+        assertThat(received.get(4).path("threatScore").asInt()).isEqualTo(75);
+        assertThat(received.get(5).path("threatScore").asInt()).isEqualTo(90);
+        assertThat(received.get(0).path("receivedAt")).isEqualTo(received.get(5).path("receivedAt"));
+        clock.set(NOW.plusSeconds(601));
+        ObjectNode late = event("late-future-client-time");
+        late.put("timestamp", NOW.plusSeconds(86400).toString());
+        assertThat(score(ingest(late))).isEqualTo(75);
     }
 
     @Test

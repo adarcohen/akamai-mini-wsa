@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.springframework.dao.DataRetrievalFailureException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -59,11 +58,11 @@ public class SamplesRepository {
         }
         if (query.from() != null) {
             sql.append(" AND event_time >= :from");
-            parameters.addValue("from", query.from().atOffset(ZoneOffset.UTC));
+            parameters.addValue("from", SqlTimestamps.lowerBound(query.from()));
         }
         if (query.to() != null) {
             sql.append(" AND event_time <= :to");
-            parameters.addValue("to", query.to().atOffset(ZoneOffset.UTC));
+            parameters.addValue("to", SqlTimestamps.upperBound(query.to()));
         }
         if (query.category() != null) {
             sql.append(" AND category = :category");

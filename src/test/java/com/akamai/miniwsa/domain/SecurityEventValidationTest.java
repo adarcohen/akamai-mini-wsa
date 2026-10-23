@@ -1,7 +1,6 @@
 package com.akamai.miniwsa.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
-
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;

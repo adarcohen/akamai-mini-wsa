@@ -1,8 +1,8 @@
-package com.akamai.miniwsa;
+package com.akamai.miniwsa.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
+import com.akamai.miniwsa.EventFixtures;
 import com.akamai.miniwsa.domain.Action;
 import com.akamai.miniwsa.domain.Category;
 import com.akamai.miniwsa.domain.SecurityEvent;

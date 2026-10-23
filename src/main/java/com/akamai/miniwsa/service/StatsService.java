@@ -1,7 +1,7 @@
 package com.akamai.miniwsa.service;
 
-import com.akamai.miniwsa.domain.StatsSummary;
 import com.akamai.miniwsa.domain.StatsSummary.TimeRange;
+import com.akamai.miniwsa.domain.StatsSummary;
 import com.akamai.miniwsa.domain.SummaryQuery;
 import com.akamai.miniwsa.repository.StatsRepository;
 import org.springframework.stereotype.Service;
