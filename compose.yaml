@@ -1,4 +1,15 @@
 services:
+  app:
+    build: .
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/miniwsa
+      DB_USERNAME: miniwsa
+      DB_PASSWORD: ${DB_PASSWORD:-miniwsa}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
   db:
     image: postgres:17-alpine
     environment:
@@ -6,7 +17,7 @@ services:
       POSTGRES_USER: miniwsa
       POSTGRES_PASSWORD: ${DB_PASSWORD:-miniwsa}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

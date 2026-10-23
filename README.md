@@ -9,16 +9,53 @@ Implemented: event model, single/batch ingestion, schema validation, server-assi
 and threat scoring, including concurrent repeat-offender detection, the statistics summary API
 and filtered/paginated event samples.
 
-Data generation is available through a standalone script. The optional full-stack Docker setup will follow; Compose currently runs
-PostgreSQL while the application runs locally.
+Data generation is available through a standalone script. Docker Compose can run the
+full stack, or only PostgreSQL while the application runs locally.
 
 ## Requirements
 
-- JDK 17 or newer.
+- JDK 17 or newer for local Java development and automated tests; full-stack Docker builds its own JDK.
 - Docker Desktop running, for the development database and integration tests.
 - Network access on the first build for Maven dependencies and Docker images.
 
 The Maven Wrapper is included; a separate Maven installation is unnecessary.
+
+## Run the full stack with Docker
+
+With Docker Desktop running, from the repository root:
+
+```bash
+docker compose up --build -d --wait
+```
+
+Stop any locally running Java application first so port 8080 is available.
+Open [Swagger UI](http://localhost:8080/docs). No host JDK or Maven is needed for
+this mode: a multi-stage image builds the JAR using the Maven Wrapper, then runs
+it with a Java 17 runtime under a non-root user. The image excludes DevTools.
+The build skips tests; run the full test suite separately with `./mvnw verify`.
+The first build needs internet access for base images and Maven dependencies.
+
+The app connects to PostgreSQL using the Compose service name `db`, waits for the
+database health check, and applies Flyway migrations on startup. Its health check
+checks the HTTP OpenAPI endpoint after startup; it is a startup/HTTP check, not a
+continuous database readiness check.
+
+```bash
+docker compose ps
+docker compose logs --tail=100 app
+docker compose down
+```
+
+`down` preserves the existing database volume and its events. Avoid `down -v` unless
+intentionally deleting the data. Rebuild with `docker compose up --build -d --wait`
+after code changes. For automatic restart while editing, use the local VS Code
+workflow below instead.
+
+Optional `.env` settings `APP_PORT` and `DB_PORT` change the published host ports.
+Both bind to localhost. Internal app-to-database traffic always uses `db:5432`.
+To switch back to local Java development, stop only the app container with
+`docker compose stop app`, leave the database running, then use Run in VS Code.
+If `DB_PORT` is changed, set local Java's `DB_URL` accordingly.
 
 ## Run locally with PostgreSQL in Docker
 
@@ -293,7 +330,8 @@ HTTP request -> EventsController -> IngestionRequestParser (validation)
 - `resources/db/migration/V3__index_event_time_queries.sql`: configuration/time and global time indexes.
 - `resources/db/migration/V4__index_sample_ordering.sql`: extends those indexes with the event ID tie-breaker.
 - `MiniWsaApplication.java`: app entry point and injectable UTC clock.
-- `compose.yaml`: development PostgreSQL service, health check and persistent volume.
+- `compose.yaml`: app/database services, health checks and persistent database volume.
+- `Dockerfile` and `.dockerignore`: isolated build stage and minimal source-only build context.
 - `.env.example`: example local configuration; `.env` itself is excluded from Git.
 - `examples/event.json`: complete request for manual testing.
 - `pom.xml`: dependencies, Java version and test/build plugins.
@@ -410,8 +448,9 @@ export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
 ## Milestones and next steps
 
 `v0.1-ingestion` marks durable ingestion and `v0.2-enrichment` marks classification and scoring.
-`v0.3-stats` marks the summary API. Samples are ready for review before `v0.4-samples`.
-Next is a realistic data generator, followed by complete-stack Docker support and final review.
+`v0.3-stats` marks the summary API, `v0.4-samples` the samples API, and
+`v0.5-generator` the data generator. Full-stack Docker support is ready for review.
+Next are final review and an optional bonus endpoint.
 
 Current engineering challenges include atomic batches, duplicate requests and stable repeat-offender
 scores under concurrent ingestion. Transactions, database uniqueness and ordered IP locks address
@@ -420,6 +459,6 @@ The injected clock makes arrival-time tests deterministic without sleeps.
 
 Additional production concerns include tenant authorization, authentication, external
 secrets, request-size limits, observability, clock-skew policy and accepted timestamp ranges.
-The assignment's optional full-stack Compose and bonus features will be considered after
-required behavior is complete. Small commits and milestone tags remain review steps;
+The required endpoints and generator are implemented, together with optional full-stack Compose.
+An optional analytics bonus can be added after review. Small commits and milestone tags remain review steps;
 no Git push or submission email is performed by the application.
