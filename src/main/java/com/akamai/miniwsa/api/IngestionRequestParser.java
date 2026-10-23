@@ -48,7 +48,8 @@ public class IngestionRequestParser {
             try {
                 SecurityEvent event = mapper.treeToValue(node, SecurityEvent.class);
                 validator.validate(event).forEach(violation -> errors.add(new FieldError(
-                        prefix + "." + violation.getPropertyPath().toString(), violation.getMessage())));
+                        prefix + "." + violation.getPropertyPath().toString().replace("clientIpValid", "clientIp"),
+                        violation.getMessage())));
                 if (!ids.add(event.eventId())) {
                     errors.add(new FieldError(prefix + ".eventId", "duplicate eventId in batch"));
                 }

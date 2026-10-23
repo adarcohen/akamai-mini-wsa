@@ -1,6 +1,8 @@
 package com.akamai.miniwsa.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -27,6 +29,12 @@ public record SecurityEvent(
         @NotNull @Valid GeoLocation geoLocation,
         @NotNull @PositiveOrZero Long requestSize,
         @NotNull @PositiveOrZero Long responseSize) {
+
+    @JsonIgnore
+    @AssertTrue(message = "must be a valid IPv4 or IPv6 literal")
+    public boolean isClientIpValid() {
+        return clientIp == null || ClientIp.isValid(clientIp);
+    }
 
     public record Rule(
             @NotBlank @Size(max = 128) String id,

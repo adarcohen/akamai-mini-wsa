@@ -1,7 +1,18 @@
 spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/miniwsa}
+    username: ${DB_USERNAME:miniwsa}
+    password: ${DB_PASSWORD:miniwsa}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 5000
+      data-source-properties:
+        reWriteBatchedInserts: true
+        options: '-c statement_timeout=15000 -c lock_timeout=5000'
   jackson:
     deserialization:
       fail-on-unknown-properties: true
+      fail-on-ignored-properties: true
       fail-on-numbers-for-enums: true
       accept-float-as-int: false
     mapper:

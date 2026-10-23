@@ -8,8 +8,18 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.OffsetDateTime;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,13 +35,30 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
+@Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(EventsApiTest.ClockConfiguration.class)
-class EventsApiTest {
+@Import(EventsApiIT.ClockConfiguration.class)
+class EventsApiIT {
     private static final Instant NOW = Instant.parse("2026-05-20T15:00:00Z");
 
     @Autowired private TestRestTemplate http;
     @Autowired private ObjectMapper mapper;
+    @Autowired private JdbcTemplate jdbc;
+
+    @Container
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+
+    @DynamicPropertySource
+    static void databaseProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.datasource.username", POSTGRES::getUsername);
+        registry.add("spring.datasource.password", POSTGRES::getPassword);
+    }
+
+    @BeforeEach
+    void clearEvents() {
+        jdbc.execute("TRUNCATE TABLE security_events");
+    }
 
     @Test
     void acceptsSingleEventAndAssignsServerTimestamp() throws Exception {
@@ -45,6 +72,12 @@ class EventsApiTest {
         ObjectNode original = received.deepCopy();
         original.remove("receivedAt");
         assertThat(original).isEqualTo(event);
+        assertThat(storedCount()).isEqualTo(1);
+        String payload = jdbc.queryForObject("SELECT payload::text FROM security_events", String.class);
+        assertThat(mapper.readTree(payload)).isEqualTo(event);
+        OffsetDateTime receivedAt = jdbc.queryForObject(
+                "SELECT received_at FROM security_events", OffsetDateTime.class);
+        assertThat(receivedAt.toInstant()).isEqualTo(NOW);
     }
 
     @Test
@@ -53,6 +86,7 @@ class EventsApiTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(response.getBody().path("accepted").asInt()).isEqualTo(2);
+        assertThat(storedCount()).isEqualTo(2);
         assertThat(response.getBody().path("events").get(0).path("eventId").asText()).isEqualTo("first");
         assertThat(response.getBody().path("events").get(1).path("eventId").asText()).isEqualTo("second");
     }
@@ -70,6 +104,7 @@ class EventsApiTest {
         assertThat(response.getBody().path("errors").toString())
                 .contains("events[1].eventId", "events[1].requestSize", "events[1].rule.severity");
         assertThat(response.getBody().has("accepted")).isFalse();
+        assertThat(storedCount()).isZero();
     }
 
     @ParameterizedTest
@@ -135,6 +170,77 @@ class EventsApiTest {
         headers.setContentType(MediaType.APPLICATION_JSON);
         var response = http.postForEntity("/v1/events/ingest", new HttpEntity<>(json, headers), JsonNode.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void rejectsStoredDuplicateWithoutOverwritingIt() throws Exception {
+        assertThat(ingest(event("existing")).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        ObjectNode changed = event("existing");
+        changed.put("path", "/changed");
+        var response = ingest(changed);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(storedCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT path FROM security_events", String.class))
+                .isEqualTo("/api/v1/login");
+    }
+
+    @Test
+    void rollsBackWholeBatchWhenOneEventAlreadyExists() throws Exception {
+        ingest(event("existing"));
+        var response = ingest(List.of(event("new-one"), event("new-two"), event("existing")));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(storedCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM security_events WHERE event_id IN ('new-one', 'new-two')", Long.class)).isZero();
+    }
+
+    @Test
+    void concurrentDuplicateRequestsStoreExactlyOneEvent() throws Exception {
+        ObjectNode event = event("concurrent");
+        var first = CompletableFuture.supplyAsync(() -> ingest(event).getStatusCode().value());
+        var second = CompletableFuture.supplyAsync(() -> ingest(event).getStatusCode().value());
+
+        assertThat(List.of(first.get(20, TimeUnit.SECONDS), second.get(20, TimeUnit.SECONDS)))
+                .containsExactlyInAnyOrder(201, 409);
+        assertThat(storedCount()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost", "example.com", "127.1", "1.2.3.256", "01.2.3.4", ":::", "fe80::1%en0"})
+    void rejectsInvalidIpLiteralsBeforeWriting(String ip) throws Exception {
+        ObjectNode event = event("invalid-ip");
+        event.put("clientIp", ip);
+        var response = ingest(event);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().path("errors").toString()).contains("events[0].clientIp");
+        assertThat(storedCount()).isZero();
+    }
+
+    @Test
+    void storesIpv6AsACanonicalAddressAndPreservesOriginalPayload() throws Exception {
+        ObjectNode event = event("ipv6");
+        event.put("clientIp", "2001:0db8:0:0:0:0:0:1");
+        assertThat(ingest(event).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(jdbc.queryForObject("SELECT host(client_ip) FROM security_events", String.class))
+                .isEqualTo("2001:db8::1");
+        String payload = jdbc.queryForObject("SELECT payload::text FROM security_events", String.class);
+        assertThat(mapper.readTree(payload).path("clientIp").asText()).isEqualTo("2001:0db8:0:0:0:0:0:1");
+    }
+
+    @Test
+    void treatsSqlCharactersAsData() throws Exception {
+        String id = "evt-'; DROP TABLE security_events; --";
+        ObjectNode event = event(id);
+        assertThat(ingest(event).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(jdbc.queryForObject("SELECT event_id FROM security_events", String.class)).isEqualTo(id);
+        assertThat(storedCount()).isEqualTo(1);
+    }
+
+    private long storedCount() {
+        return jdbc.queryForObject("SELECT count(*) FROM security_events", Long.class);
     }
 
     private ResponseEntity<JsonNode> ingest(Object body) {
