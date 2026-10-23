@@ -36,14 +36,15 @@ public class EventRepository {
 
     /** Sorted database-wide transaction locks coordinate IP counts across application instances. */
     public void lockClients(List<String> clients) {
-        jdbc.queryForList("""
-                SELECT pg_advisory_xact_lock(lock_key)
-                FROM (
-                    SELECT DISTINCT hashtextextended(ip, 0) AS lock_key
-                    FROM unnest(CAST(:clients AS text[])) AS clients(ip)
-                    ORDER BY lock_key
-                ) ordered_keys
-                """, new MapSqlParameterSource("clients", new SqlArrayValue("text", clients.toArray())));
+        List<Long> keys = jdbc.queryForList("""
+                SELECT hashtextextended(ip, 0)
+                FROM unnest(CAST(:clients AS text[])) AS clients(ip)
+                """, new MapSqlParameterSource("clients", new SqlArrayValue("text", clients.toArray())), Long.class);
+        // Sort the actual database lock keys, not IP strings; collisions share one lock.
+        // Sequential statements make acquisition order explicit, independent of SQL evaluation order.
+        for (long key : keys.stream().distinct().sorted().toList()) {
+            jdbc.queryForList("SELECT pg_advisory_xact_lock(:key)", new MapSqlParameterSource("key", key));
+        }
     }
 
     /** One database call for all clients; only five prior arrivals per IP affect the policy. */
